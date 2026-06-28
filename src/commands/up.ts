@@ -2,7 +2,37 @@ import { Command } from "commander";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { collectFiles } from "../utils/collectFiles.js";
-import { extToLang } from "../utils/extToLang.js";
+import { extensionToLanguage } from "../utils/extToLang.js";
+import { describeError } from "../utils/describeError.js";
+
+type UpOptionsT = {
+  output?: string;
+  extensions?: string[];
+  notExtensions?: string[];
+  ignore?: string[];
+};
+
+// Build the markdown for a single file: a heading naming the file
+// followed by its contents in a 4-backtick fenced block. Four
+// backticks let files that themselves contain 3-backtick markdown
+// code blocks survive without breaking the surrounding snapshot.
+const buildFileSection = (
+  relativePath: string,
+  language: string,
+  content: string,
+): string => {
+  const heading = `## \`${relativePath}\`\n`;
+  const fencedContent = `\`\`\`\`${language}\n${content}\n\`\`\`\`\n`;
+  return `${heading}\n${fencedContent}`;
+};
+
+const resolveOutputPath = (output?: string): string => {
+  const hasOutputName = output !== undefined;
+  const outputName = hasOutputName
+    ? output.replace(/\.md$/i, "")
+    : `replicate-${Date.now()}`;
+  return path.resolve(process.cwd(), `${outputName}.md`);
+};
 
 export const upCommand = new Command("up")
   .description("Concatenate files under <path> into a single markdown snapshot")
@@ -23,102 +53,67 @@ export const upCommand = new Command("up")
     "-i, --ignore <patterns...>",
     "Additional ignore patterns (added to defaults)",
   )
-  .action(
-    async (
-      targetPath: string,
-      opts: {
-        output?: string;
-        extensions?: string[];
-        notExtensions?: string[];
-        ignore?: string[];
-      },
-    ) => {
-      const rootDir = path.resolve(process.cwd(), targetPath);
+  .action(async (targetPath: string, options: UpOptionsT) => {
+    const rootDir = path.resolve(process.cwd(), targetPath);
 
-      // Verify directory exists
-      try {
-        const stat = await fs.stat(rootDir);
-        if (!stat.isDirectory()) {
-          console.error(`Error: "${rootDir}" is not a directory.`);
-          process.exit(1);
-        }
-      } catch {
-        console.error(`Error: Directory "${rootDir}" does not exist.`);
-        process.exit(1);
-      }
+    const directoryStats = await fs.stat(rootDir).catch(() => {
+      return null;
+    });
 
-      console.log(`\n📂  Scanning ${rootDir} …`);
+    const isMissingDirectory = directoryStats === null;
+    if (isMissingDirectory) {
+      console.error(`Error: Directory "${rootDir}" does not exist.`);
+      process.exit(1);
+    }
 
-      const files = await collectFiles(rootDir, {
-        extensions: opts.extensions,
-        notExtensions: opts.notExtensions,
-        ignore: opts.ignore,
+    const isNotDirectory = !directoryStats.isDirectory();
+    if (isNotDirectory) {
+      console.error(`Error: "${rootDir}" is not a directory.`);
+      process.exit(1);
+    }
+
+    console.log(`\n📂  Scanning ${rootDir} …`);
+
+    const files = await collectFiles(rootDir, {
+      extensions: options.extensions,
+      notExtensions: options.notExtensions,
+      ignore: options.ignore,
+    });
+
+    const hasFiles = files.length > 0;
+    if (!hasFiles) {
+      console.warn("⚠️   No files matched the given criteria. Nothing to write.");
+      process.exit(0);
+    }
+
+    console.log(`📄  Found ${files.length} file(s). Building markdown …`);
+
+    // File contents only — no header, TOC, or other metadata. Each
+    // section is just a heading naming the file (so `down` knows where
+    // to put it back) followed by the file's contents.
+    const sections: string[] = [];
+
+    for (const file of files) {
+      const relativePath = path.relative(rootDir, file);
+      const fileExtension = path.extname(file);
+      const language = extensionToLanguage(fileExtension);
+
+      const content = await fs.readFile(file, "utf8").catch((thrown) => {
+        const reason = describeError(thrown);
+        console.warn(`  ⚠️  Skipping ${relativePath} — could not read file: ${reason}`);
+        return null;
       });
 
-      if (files.length === 0) {
-        console.warn(
-          "⚠️   No files matched the given criteria. Nothing to write.",
-        );
-        process.exit(0);
-      }
+      const couldNotRead = content === null;
+      if (couldNotRead) continue;
 
-      console.log(`📄  Found ${files.length} file(s). Building markdown …`);
+      sections.push(buildFileSection(relativePath, language, content));
+    }
 
-      const sections: string[] = [];
+    const outputPath = resolveOutputPath(options.output);
 
-      // Header
-      const timestamp = new Date().toISOString();
-      sections.push(`# replicate snapshot\n`);
-      sections.push(`> Generated: ${timestamp}  \n> Source: \`${rootDir}\`\n`);
-      sections.push(`---\n`);
+    await fs.writeFile(outputPath, sections.join("\n"), "utf8");
 
-      // Table of contents
-      sections.push(`## Table of Contents\n`);
-      for (const file of files) {
-        const rel = path.relative(rootDir, file);
-        // Create a GitHub-style anchor: lowercase, spaces→-, strip special chars
-        const anchor = rel
-          .toLowerCase()
-          .replace(/[^a-z0-9\-_./ ]/g, "")
-          .replace(/[\s/]+/g, "-");
-        sections.push(`- [\`${rel}\`](#${anchor})`);
-      }
-      sections.push("\n---\n");
-
-      // File contents
-      for (const file of files) {
-        const rel = path.relative(rootDir, file);
-        const ext = path.extname(file);
-        const lang = extToLang(ext);
-        const anchor = rel
-          .toLowerCase()
-          .replace(/[^a-z0-9\-_./ ]/g, "")
-          .replace(/[\s/]+/g, "-");
-
-        let content: string;
-        try {
-          content = await fs.readFile(file, "utf8");
-        } catch (err) {
-          console.warn(
-            `  ⚠️  Skipping ${rel} — could not read file: ${(err as Error).message}`,
-          );
-          continue;
-        }
-
-        sections.push(`## \`${rel}\` {#${anchor}}\n`);
-        sections.push(`\`\`\`${lang}\n${content}\n\`\`\`\n`);
-      }
-
-      // Determine output path
-      const outputName = opts.output
-        ? opts.output.replace(/\.md$/i, "")
-        : `replicate-${Date.now()}`;
-
-      const outputPath = path.resolve(process.cwd(), `${outputName}.md`);
-
-      await fs.writeFile(outputPath, sections.join("\n"), "utf8");
-
-      console.log(`\n✅  Written to: ${outputPath}`);
-      console.log(`    Files included : ${files.length}`);
-    },
-  );
+    console.log(`\n✅  Written to: ${outputPath}`);
+    console.log(`    Files included : ${files.length}`);
+  });

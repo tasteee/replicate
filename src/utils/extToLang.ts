@@ -1,5 +1,5 @@
-/** Map file extensions to markdown code-fence language identifiers. */
-const EXT_TO_LANG: Record<string, string> = {
+// Map file extensions to markdown code-fence language identifiers.
+const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   // Web
   ts: 'typescript',
   tsx: 'tsx',
@@ -56,7 +56,9 @@ const EXT_TO_LANG: Record<string, string> = {
   dockerfile: 'dockerfile',
 }
 
-export function extToLang(ext: string): string {
-  const clean = ext.startsWith('.') ? ext.slice(1).toLowerCase() : ext.toLowerCase()
-  return EXT_TO_LANG[clean] ?? clean
+export const extensionToLanguage = (fileExtension: string): string => {
+  const hasLeadingDot = fileExtension.startsWith('.')
+  const withoutDot = hasLeadingDot ? fileExtension.slice(1) : fileExtension
+  const normalizedExtension = withoutDot.toLowerCase()
+  return EXTENSION_TO_LANGUAGE[normalizedExtension] ?? normalizedExtension
 }

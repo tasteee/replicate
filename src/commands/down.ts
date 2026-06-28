@@ -1,36 +1,62 @@
 import { Command } from "commander";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { describeError } from "../utils/describeError.js";
 
-/**
- * Parses a replicate markdown snapshot and returns an array of
- * { filePath, content } objects ready to be written to disk.
- */
-interface ParsedFile {
+type ParsedFileT = {
   filePath: string;
   content: string;
-}
+};
 
-function parseSnapshot(markdown: string): ParsedFile[] {
-  const results: ParsedFile[] = [];
+type DownOptionsT = {
+  dir?: string;
+};
 
-  // Each file section starts with a heading like:
-  //   ## `path/to/file.ts` {#anchor}
-  // followed immediately by a fenced code block.
-  //
-  // We look for that pattern using a regex.
-  const sectionRegex =
-    /^##\s+`([^`]+)`(?:\s+\{#[^}]+\})?\s*\n+```[^\n]*\n([\s\S]*?)```/gm;
+// Each file section starts with a heading like:
+//   ## `path/to/file.ts`
+// followed immediately by a 4-backtick fenced code block (4
+// backticks so that files containing 3-backtick markdown blocks
+// survive the round trip).
+const SECTION_REGEX =
+  /^##\s+`([^`]+)`(?:\s+\{#[^}]+\})?\s*\n+````[^\n]*\n([\s\S]*?)\n````/gm;
 
-  let match: RegExpExecArray | null;
-  while ((match = sectionRegex.exec(markdown)) !== null) {
-    const [, filePath, rawContent] = match;
-    // rawContent ends with a trailing newline before the closing fence — trim it
-    results.push({ filePath, content: rawContent.replace(/\n$/, "") });
+// Parse a replicate markdown snapshot into the files it describes.
+// Any prose or extra markdown between sections is ignored, so the
+// snapshot stays safe to hand-edit.
+const parseSnapshot = (markdown: string): ParsedFileT[] => {
+  const sectionMatches = markdown.matchAll(SECTION_REGEX);
+  const parsedFiles: ParsedFileT[] = [];
+
+  for (const sectionMatch of sectionMatches) {
+    const filePath = sectionMatch[1];
+    const rawContent = sectionMatch[2];
+    // `up` writes the contents followed by a newline before the
+    // closing fence, so drop that one trailing newline to restore
+    // the file byte-for-byte.
+    const content = rawContent.replace(/\n$/, "");
+    parsedFiles.push({ filePath, content });
   }
 
-  return results;
-}
+  return parsedFiles;
+};
+
+const resolveOutputRoot = (outputDirectory?: string): string => {
+  const hasOutputDirectory = outputDirectory !== undefined;
+  if (hasOutputDirectory) return path.resolve(process.cwd(), outputDirectory);
+  return process.cwd();
+};
+
+// Write a single reconstructed file, creating parent directories as
+// needed. Returns null on success or an error message on failure.
+const writeReconstructedFile = async (
+  destinationPath: string,
+  content: string,
+): Promise<string | null> => {
+  const destinationDirectory = path.dirname(destinationPath);
+  await fs.mkdir(destinationDirectory, { recursive: true });
+  await fs.writeFile(destinationPath, content + "\n", "utf8");
+  return null;
+};
 
 export const downCommand = new Command("down")
   .description(
@@ -41,26 +67,30 @@ export const downCommand = new Command("down")
     "-d, --dir <dir>",
     "Output root directory (defaults to current working directory)",
   )
-  .action(async (snapshotPath: string, opts: { dir?: string }) => {
-    const resolved = path.resolve(process.cwd(), snapshotPath);
+  .action(async (snapshotPath: string, options: DownOptionsT) => {
+    const resolvedSnapshotPath = path.resolve(process.cwd(), snapshotPath);
 
-    // Verify file exists
-    try {
-      const stat = await fs.stat(resolved);
-      if (!stat.isFile()) {
-        console.error(`Error: "${resolved}" is not a file.`);
-        process.exit(1);
-      }
-    } catch {
-      console.error(`Error: File "${resolved}" does not exist.`);
+    const snapshotStats = await fs.stat(resolvedSnapshotPath).catch(() => {
+      return null;
+    });
+
+    const isMissingFile = snapshotStats === null;
+    if (isMissingFile) {
+      console.error(`Error: File "${resolvedSnapshotPath}" does not exist.`);
       process.exit(1);
     }
 
-    const markdown = await fs.readFile(resolved, "utf8");
+    const isNotFile = !snapshotStats.isFile();
+    if (isNotFile) {
+      console.error(`Error: "${resolvedSnapshotPath}" is not a file.`);
+      process.exit(1);
+    }
 
+    const markdown = await fs.readFile(resolvedSnapshotPath, "utf8");
     const files = parseSnapshot(markdown);
 
-    if (files.length === 0) {
+    const hasFiles = files.length > 0;
+    if (!hasFiles) {
       console.error(
         "⚠️   No file sections found in the snapshot.\n" +
           "    Make sure you're pointing at a valid replicate snapshot created with `replicate up`.",
@@ -68,41 +98,45 @@ export const downCommand = new Command("down")
       process.exit(1);
     }
 
-    const outRoot = opts.dir
-      ? path.resolve(process.cwd(), opts.dir)
-      : process.cwd();
+    const outputRoot = resolveOutputRoot(options.dir);
 
     console.log(
-      `\n📦  Reconstructing ${files.length} file(s) into: ${outRoot}\n`,
+      `\n📦  Reconstructing ${files.length} file(s) into: ${outputRoot}\n`,
     );
 
-    let written = 0;
-    let skipped = 0;
+    let writtenCount = 0;
+    let skippedCount = 0;
 
-    for (const { filePath, content } of files) {
-      // Normalise the path and prevent path traversal
-      const normalised = path.normalize(filePath);
-      if (normalised.startsWith("..")) {
-        console.warn(`  ⚠️  Skipping "${filePath}" — path traversal detected.`);
-        skipped++;
+    for (const parsedFile of files) {
+      // Normalise the path and prevent path traversal.
+      const normalizedPath = path.normalize(parsedFile.filePath);
+      const isTraversal = normalizedPath.startsWith("..");
+      if (isTraversal) {
+        console.warn(
+          `  ⚠️  Skipping "${parsedFile.filePath}" — path traversal detected.`,
+        );
+        skippedCount++;
         continue;
       }
 
-      const destPath = path.join(outRoot, normalised);
-      const destDir = path.dirname(destPath);
+      const destinationPath = path.join(outputRoot, normalizedPath);
+      const writeError = await writeReconstructedFile(
+        destinationPath,
+        parsedFile.content,
+      ).catch(describeError);
 
-      try {
-        await fs.mkdir(destDir, { recursive: true });
-        await fs.writeFile(destPath, content + "\n", "utf8");
-        console.log(`  ✅  ${normalised}`);
-        written++;
-      } catch (err) {
-        console.error(
-          `  ❌  Failed to write "${normalised}": ${(err as Error).message}`,
-        );
-        skipped++;
+      const didFail = writeError !== null;
+      if (didFail) {
+        console.error(`  ❌  Failed to write "${normalizedPath}": ${writeError}`);
+        skippedCount++;
+        continue;
       }
+
+      console.log(`  ✅  ${normalizedPath}`);
+      writtenCount++;
     }
 
-    console.log(`\n✨  Done. ${written} file(s) written, ${skipped} skipped.`);
+    console.log(
+      `\n✨  Done. ${writtenCount} file(s) written, ${skippedCount} skipped.`,
+    );
   });

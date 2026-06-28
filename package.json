@@ -3,6 +3,7 @@
   "version": "0.0.11",
   "private": false,
   "description": "Concatenate globbed files into a single markdown file, or reconstruct from one.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "replicate": "./dist/index.mjs"

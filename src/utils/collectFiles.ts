@@ -2,57 +2,71 @@ import { glob } from 'glob'
 import path from 'node:path'
 import { mergeIgnorePatterns } from './ignorePatterns.js'
 
-export interface CollectOptions {
-  /** Only include files with these extensions (without leading dot). */
+export type CollectOptionsT = {
+  // Only include files with these extensions (without leading dot).
   extensions?: string[]
-  /** Exclude files with these extensions (without leading dot). */
+  // Exclude files with these extensions (without leading dot).
   notExtensions?: string[]
-  /** Additional ignore patterns on top of the defaults. */
+  // Additional ignore patterns on top of the defaults.
   ignore?: string[]
 }
 
-/**
- * Recursively collect files under `rootDir` according to the given options.
- * Returns absolute paths sorted alphabetically.
- */
-export async function collectFiles(
+// Build a glob pattern that matches the requested extensions.
+const buildExtensionPattern = (extensions: string[]): string => {
+  const isSingleExtension = extensions.length === 1
+  if (isSingleExtension) return `**/*.${extensions[0]}`
+
+  const extensionList = extensions.join(',')
+  return `**/*.{${extensionList}}`
+}
+
+// Bare ignore names match at any depth; patterns that already
+// contain a slash are used as written.
+const expandIgnorePattern = (ignorePattern: string): string => {
+  const isNestedPattern = ignorePattern.includes('/')
+  if (isNestedPattern) return ignorePattern
+  return `**/${ignorePattern}/**`
+}
+
+// Recursively collect files under rootDir according to the given
+// options. Returns absolute paths sorted alphabetically.
+export const collectFiles = async (
   rootDir: string,
-  options: CollectOptions = {}
-): Promise<string[]> {
-  const { extensions, notExtensions, ignore: extraIgnore } = options
+  options: CollectOptionsT = {}
+): Promise<string[]> => {
+  const ignorePatterns = mergeIgnorePatterns(options.ignore)
+  const expandedIgnorePatterns = ignorePatterns.map((ignorePattern) => {
+    return expandIgnorePattern(ignorePattern)
+  })
 
-  const ignorePatterns = mergeIgnorePatterns(extraIgnore)
+  const requestedExtensions = options.extensions ?? []
+  const hasRequestedExtensions = requestedExtensions.length > 0
+  const globPattern = hasRequestedExtensions
+    ? buildExtensionPattern(requestedExtensions)
+    : '**/*'
 
-  // Build a glob pattern based on requested extensions
-  let pattern: string
-  if (extensions && extensions.length > 0) {
-    const extList = extensions.join(',')
-    pattern =
-      extensions.length === 1
-        ? `**/*.${extensions[0]}`
-        : `**/*.{${extList}}`
-  } else {
-    pattern = '**/*'
-  }
-
-  const matches = await glob(pattern, {
+  const matchedPaths = await glob(globPattern, {
     cwd: rootDir,
     absolute: true,
     nodir: true,
-    ignore: ignorePatterns.map((p) =>
-      // Make sure nested patterns like node_modules/**/* work
-      p.includes('/') ? p : `**/${p}/**`
-    ),
+    ignore: expandedIgnorePatterns,
     dot: false,
   })
 
-  let files = matches.sort()
+  const sortedPaths = matchedPaths.sort()
 
-  // Apply notExtensions filter
-  if (notExtensions && notExtensions.length > 0) {
-    const excluded = new Set(notExtensions.map((e) => `.${e}`))
-    files = files.filter((f) => !excluded.has(path.extname(f)))
-  }
+  const excludedExtensions = options.notExtensions ?? []
+  const hasExcludedExtensions = excludedExtensions.length > 0
+  if (!hasExcludedExtensions) return sortedPaths
 
-  return files
+  const excludedExtensionSet = new Set(
+    excludedExtensions.map((extension) => {
+      return `.${extension}`
+    })
+  )
+  const filteredPaths = sortedPaths.filter((filePath) => {
+    const fileExtension = path.extname(filePath)
+    return !excludedExtensionSet.has(fileExtension)
+  })
+  return filteredPaths
 }

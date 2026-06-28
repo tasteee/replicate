@@ -1,7 +1,6 @@
-/**
- * Default patterns that replicate ignores unless overridden.
- * These cover common non-source directories and generated/lock files.
- */
+// Default patterns that replicate ignores unless overridden.
+// These cover common non-source directories and generated
+// or lock files.
 export const DEFAULT_IGNORE_PATTERNS: string[] = [
   // Dependency dirs
   "node_modules",
@@ -45,9 +44,9 @@ export const DEFAULT_IGNORE_PATTERNS: string[] = [
   ".DS_Store",
   "Thumbs.db",
 
-  // Compiled / map files
+  // Compiled / map files (but NOT *.d.ts — declaration files
+  // are often hand-written source and must be included)
   "*.map",
-  "*.d.ts",
   "*.tsbuildinfo",
 
   // Log files
@@ -55,11 +54,9 @@ export const DEFAULT_IGNORE_PATTERNS: string[] = [
   "logs",
 ];
 
-/**
- * Merge user-supplied ignore patterns with the defaults.
- * Users can add extra patterns; the defaults always apply.
- */
-export function mergeIgnorePatterns(userPatterns: string[] = []): string[] {
-  const merged = new Set([...DEFAULT_IGNORE_PATTERNS, ...userPatterns]);
-  return Array.from(merged);
+// Merge user-supplied ignore patterns with the defaults. Users
+// can add extra patterns; the defaults always apply.
+export const mergeIgnorePatterns = (userPatterns: string[] = []): string[] => {
+  const mergedPatterns = new Set([...DEFAULT_IGNORE_PATTERNS, ...userPatterns])
+  return Array.from(mergedPatterns)
 }
